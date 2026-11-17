@@ -3,6 +3,7 @@ package conf
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -20,6 +21,7 @@ type parser struct {
 	ikeys    []item
 	fp       string
 	pedantic bool
+	includeStack map[string]bool
 }
 
 func Parse(data string) (map[string]any, error) {
@@ -39,32 +41,43 @@ func ParseWithChecks(data string) (map[string]any, error) {
 }
 
 func ParseFile(fp string) (map[string]any, error) {
-	data, err := os.ReadFile(fp)
-	if err != nil {
-		return nil, fmt.Errorf("error opening config file: %v", err)
-	}
-	p, err := parseData(string(data), fp, false)
-	if err != nil {
-		return nil, err
-	}
-	return p.mapping, nil
+	return parseFile(fp, false, make(map[string]bool))
 }
 
 func ParseFileWithChecks(fp string) (map[string]any, error) {
-	data, err := os.ReadFile(fp)
+	return parseFile(fp, true, make(map[string]bool))
+}
+
+func parseFile(fp string, pedantic bool, stack map[string]bool) (map[string]any, error) {
+	abs, err := filepath.Abs(fp)
 	if err != nil {
 		return nil, err
 	}
-
-	p, err := parseData(string(data), fp, true)
+	// Resolve symlinks to prevent bypassing cycle detection with path aliases.
+	if resolved, err := filepath.EvalSymlinks(abs); err == nil {
+		abs = resolved
+	}
+	if stack[abs] {
+		return nil, fmt.Errorf("cyclic include: %s", abs)
+	}
+	data, err := os.ReadFile(abs)
+	if err != nil {
+		return nil, fmt.Errorf("error opening config file %q: %w", abs, err)
+	}
+	stack[abs] = true
+	defer delete(stack, abs)
+	p, err := parseDataWithStack(string(data), abs, pedantic, stack)
 	if err != nil {
 		return nil, err
 	}
-
 	return p.mapping, nil
 }
 
 func parseData(data, fp string, pedantic bool) (p *parser, err error) {
+	return parseDataWithStack(data, fp, pedantic, make(map[string]bool))
+}
+
+func parseDataWithStack(data, fp string, pedantic bool, stack map[string]bool) (p *parser, err error) {
 	p = &parser{
 		mapping:  make(map[string]any),
 		lx:       lex(data),
@@ -73,6 +86,7 @@ func parseData(data, fp string, pedantic bool) (p *parser, err error) {
 		ikeys:    make([]item, 0),
 		fp:       filepath.Dir(fp),
 		pedantic: pedantic,
+		includeStack: stack,
 	}
 
 	p.pushContext(p.mapping)
@@ -251,40 +265,47 @@ func parseInteger(val string) (any, error) {
 	if err != nil {
 		return nil, fmt.Errorf("invalid integer '%s'", val)
 	}
-	return applySuffix(num, suffix), nil
+	return applySuffix(num, suffix)
 }
 
-func applySuffix(num int64, suffix string) any {
+func applySuffix(num int64, suffix string) (int64, error) {
 	suffix = strings.ToLower(suffix)
-
+	var multiplier int64
 	switch suffix {
+	case "":
+		multiplier = 1
 	case "k":
-		return num * 1000
+		multiplier = 1000
 	case "m":
-		return num * 1000 * 1000
+		multiplier = 1000000
 	case "g":
-		return num * 1000 * 1000 * 1000
+		multiplier = 1000000000
 	case "t":
-		return num * 1000 * 1000 * 1000 * 1000
-	case "kb", "ki", "kib":
-		return num * 1024
-	case "mb", "mi", "mib":
-		return num * 1024 * 1024
-	case "gb", "gi", "gib":
-		return num * 1024 * 1024 * 1024
-	case "tb", "ti", "tib":
-		return num * 1024 * 1024 * 1024 * 1024
+		multiplier = 1000000000000
 	case "p":
-		return num * 1000 * 1000 * 1000 * 1000 * 1000
-	case "pb", "pi", "pib":
-		return num * 1024 * 1024 * 1024 * 1024 * 1024
+		multiplier = 1000000000000000
 	case "e":
-		return num * 1000 * 1000 * 1000 * 1000 * 1000 * 1000
+		multiplier = 1000000000000000000
+	case "kb", "ki", "kib":
+		multiplier = 1024
+	case "mb", "mi", "mib":
+		multiplier = 1024 * 1024
+	case "gb", "gi", "gib":
+		multiplier = 1024 * 1024 * 1024
+	case "tb", "ti", "tib":
+		multiplier = 1024 * 1024 * 1024 * 1024
+	case "pb", "pi", "pib":
+		multiplier = 1024 * 1024 * 1024 * 1024 * 1024
 	case "eb", "ei", "eib":
-		return num * 1024 * 1024 * 1024 * 1024 * 1024 * 1024
+		multiplier = 1024 * 1024 * 1024 * 1024 * 1024 * 1024
 	default:
-		return num
+		return 0, fmt.Errorf("unknown integer suffix %q", suffix)
 	}
+	if num > 0 && num > math.MaxInt64/multiplier ||
+		num < 0 && num < math.MinInt64/multiplier {
+		return 0, fmt.Errorf("integer overflow for %d%s", num, suffix)
+	}
+	return num * multiplier, nil
 }
 
 func parseBool(val string) bool {
@@ -328,17 +349,7 @@ func (p *parser) lookupVariable(varReference string) (any, bool, error) {
 }
 
 func parseIncludeFile(p *parser, fileName string) (map[string]any, error) {
-	var m map[string]any
-	var err error // Declare err outside the if block
-
-	if p.pedantic {
-		m, err = ParseFileWithChecks(filepath.Join(p.fp, fileName)) // Assign error to the variable
-	} else {
-		m, err = ParseFile(filepath.Join(p.fp, fileName)) // Assign error to the variable
-	}
-
-	// Return both the map and the error
-	return m, err
+	return parseFile(filepath.Join(p.fp, fileName), p.pedantic, p.includeStack)
 }
 
 func (p *parser) setValue(val any) {
