@@ -29,6 +29,8 @@ type parser struct {
 	fp       string
 	pedantic bool
 	includeStack map[string]bool
+	options Options
+	parseErr error
 }
 
 func Parse(data string) (map[string]any, error) {
@@ -56,6 +58,10 @@ func ParseFileWithChecks(fp string) (map[string]any, error) {
 }
 
 func parseFile(fp string, pedantic bool, stack map[string]bool) (map[string]any, error) {
+	return parseFileWithOptions(fp, pedantic, stack, Options{})
+}
+
+func parseFileWithOptions(fp string, pedantic bool, stack map[string]bool, opts Options) (map[string]any, error) {
 	abs, err := filepath.Abs(fp)
 	if err != nil {
 		return nil, err
@@ -63,6 +69,17 @@ func parseFile(fp string, pedantic bool, stack map[string]bool) (map[string]any,
 	// Resolve symlinks to prevent bypassing cycle detection with path aliases.
 	if resolved, err := filepath.EvalSymlinks(abs); err == nil {
 		abs = resolved
+	}
+	if opts.IncludeRoot != "" {
+		root, err := filepath.Abs(opts.IncludeRoot)
+		if err != nil { return nil, err }
+		root, err = filepath.EvalSymlinks(root)
+		if err != nil { return nil, err }
+		rel, err := filepath.Rel(root, abs)
+		if err != nil { return nil, err }
+		if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
+			return nil, fmt.Errorf("include path %q escapes root %q", abs, root)
+		}
 	}
 	if len(stack) >= maxIncludeDepth {
 		return nil, fmt.Errorf("%w (%d): %s", ErrIncludeDepth, maxIncludeDepth, abs)
@@ -80,7 +97,7 @@ func parseFile(fp string, pedantic bool, stack map[string]bool) (map[string]any,
 	if len(data) > maxConfigBytes { return nil, ErrConfigTooLarge }
 	stack[abs] = true
 	defer delete(stack, abs)
-	p, err := parseDataWithStack(string(data), abs, pedantic, stack)
+	p, err := parseDataWithOptions(string(data), abs, pedantic, stack, opts)
 	if err != nil {
 		return nil, err
 	}
@@ -92,6 +109,10 @@ func parseData(data, fp string, pedantic bool) (p *parser, err error) {
 }
 
 func parseDataWithStack(data, fp string, pedantic bool, stack map[string]bool) (p *parser, err error) {
+	return parseDataWithOptions(data, fp, pedantic, stack, Options{})
+}
+
+func parseDataWithOptions(data, fp string, pedantic bool, stack map[string]bool, opts Options) (p *parser, err error) {
 	if len(data) > maxConfigBytes { return nil, ErrConfigTooLarge }
 	defer func() {
 		if r := recover(); r != nil {
@@ -108,6 +129,7 @@ func parseDataWithStack(data, fp string, pedantic bool, stack map[string]bool) (
 		fp:       filepath.Dir(fp),
 		pedantic: pedantic,
 		includeStack: stack,
+		options: opts,
 	}
 
 	p.pushContext(p.mapping)
@@ -122,6 +144,7 @@ func parseDataWithStack(data, fp string, pedantic bool, stack map[string]bool) (
 		if err := p.processItem(it, fp); err != nil {
 			return nil, err
 		}
+		if p.parseErr != nil { return nil, p.parseErr }
 		if it.typ == itemEOF {
 			break
 		}
@@ -359,6 +382,7 @@ func (p *parser) lookupVariable(varReference string) (any, bool, error) {
 		}
 	}
 	if vStr, ok := os.LookupEnv(varReference); ok {
+		if p.options.EnvAsString { return vStr, true, nil }
 		if vmap, err := Parse(fmt.Sprintf("%s=%s", pkey, vStr)); err == nil {
 			v, ok := vmap[pkey]
 			return v, ok, nil
@@ -370,10 +394,16 @@ func (p *parser) lookupVariable(varReference string) (any, bool, error) {
 }
 
 func parseIncludeFile(p *parser, fileName string) (map[string]any, error) {
-	return parseFile(filepath.Join(p.fp, fileName), p.pedantic, p.includeStack)
+	return parseFileWithOptions(filepath.Join(p.fp, fileName), p.pedantic, p.includeStack, p.options)
 }
 
 func (p *parser) setValue(val any) {
+	if p.options.RejectDuplicateKeys {
+		if ctx, ok := p.ctx.(map[string]any); ok && len(p.keys) > 0 {
+			key := p.keys[len(p.keys)-1]
+			if _, exists := ctx[key]; exists { p.parseErr = fmt.Errorf("duplicate key %q", key); return }
+		}
+	}
 	// Test to see if we are on an array or a map
 
 	// Array processing
