@@ -30,6 +30,7 @@ type parser struct {
 	pedantic bool
 	includeStack map[string]bool
 	options Options
+	parseErr error
 }
 
 func Parse(data string) (map[string]any, error) {
@@ -143,6 +144,7 @@ func parseDataWithOptions(data, fp string, pedantic bool, stack map[string]bool,
 		if err := p.processItem(it, fp); err != nil {
 			return nil, err
 		}
+		if p.parseErr != nil { return nil, p.parseErr }
 		if it.typ == itemEOF {
 			break
 		}
@@ -399,7 +401,7 @@ func (p *parser) setValue(val any) {
 	if p.options.RejectDuplicateKeys {
 		if ctx, ok := p.ctx.(map[string]any); ok && len(p.keys) > 0 {
 			key := p.keys[len(p.keys)-1]
-			if _, exists := ctx[key]; exists { panic(fmt.Sprintf("duplicate key %q", key)) }
+			if _, exists := ctx[key]; exists { p.parseErr = fmt.Errorf("duplicate key %q", key); return }
 		}
 	}
 	// Test to see if we are on an array or a map
