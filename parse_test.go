@@ -250,3 +250,47 @@ func TestJSONParseCompat(t *testing.T) {
 		})
 	}
 }
+
+func TestIncludeCycles(t *testing.T) {
+	dir := t.TempDir()
+	a := filepath.Join(dir, "a.conf")
+	b := filepath.Join(dir, "b.conf")
+	if err := os.WriteFile(a, []byte("include 'b.conf'\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(b, []byte("include 'a.conf'\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	for _, parse := range []func(string) (map[string]any, error){ParseFile, ParseFileWithChecks} {
+		_, err := parse(a)
+		if err == nil || !strings.Contains(err.Error(), "cyclic include") {
+			t.Fatalf("expected cyclic include error, got %v", err)
+		}
+	}
+}
+
+func TestIntegerOverflow(t *testing.T) {
+	for _, input := range []string{
+		"size = 9223372036854775807k",
+		"size = -9223372036854775808k",
+	} {
+		_, err := Parse(input)
+		if err == nil {
+			t.Errorf("expected integer overflow for %q", input)
+		}
+	}
+	for _, tc := range []struct {
+		value string
+		want int64
+	}{
+		{"2kb", 2048},
+		{"8k", 8000},
+		{"-2m", -2000000},
+		{"9223372036854775807", 9223372036854775807},
+	} {
+		got, err := parseInteger(tc.value)
+		if err != nil || got != tc.want {
+			t.Errorf("parseInteger(%q) = %v, %v; want %d", tc.value, got, err, tc.want)
+		}
+	}
+}
