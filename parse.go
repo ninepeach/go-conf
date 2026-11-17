@@ -2,6 +2,7 @@ package conf
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
 	"os"
@@ -11,6 +12,12 @@ import (
 	"time"
 	"unicode"
 )
+
+const maxIncludeDepth = 32
+const maxConfigBytes = 8 << 20
+
+var ErrConfigTooLarge = errors.New("config exceeds 8 MiB limit")
+var ErrIncludeDepth = errors.New("maximum include depth exceeded")
 
 type parser struct {
 	mapping  map[string]any
@@ -57,13 +64,20 @@ func parseFile(fp string, pedantic bool, stack map[string]bool) (map[string]any,
 	if resolved, err := filepath.EvalSymlinks(abs); err == nil {
 		abs = resolved
 	}
+	if len(stack) >= maxIncludeDepth {
+		return nil, fmt.Errorf("%w (%d): %s", ErrIncludeDepth, maxIncludeDepth, abs)
+	}
 	if stack[abs] {
 		return nil, fmt.Errorf("cyclic include: %s", abs)
 	}
+	info, err := os.Stat(abs)
+	if err != nil { return nil, err }
+	if info.Size() > maxConfigBytes { return nil, ErrConfigTooLarge }
 	data, err := os.ReadFile(abs)
 	if err != nil {
 		return nil, fmt.Errorf("error opening config file %q: %w", abs, err)
 	}
+	if len(data) > maxConfigBytes { return nil, ErrConfigTooLarge }
 	stack[abs] = true
 	defer delete(stack, abs)
 	p, err := parseDataWithStack(string(data), abs, pedantic, stack)
@@ -78,6 +92,13 @@ func parseData(data, fp string, pedantic bool) (p *parser, err error) {
 }
 
 func parseDataWithStack(data, fp string, pedantic bool, stack map[string]bool) (p *parser, err error) {
+	if len(data) > maxConfigBytes { return nil, ErrConfigTooLarge }
+	defer func() {
+		if r := recover(); r != nil {
+			p = nil
+			err = fmt.Errorf("invalid parser state: %v", r)
+		}
+	}()
 	p = &parser{
 		mapping:  make(map[string]any),
 		lx:       lex(data),
@@ -229,7 +250,7 @@ func (p *parser) processItem(it item, fp string) error {
 	case itemInclude:
 		m, err := parseIncludeFile(p, it.val)
 		if err != nil {
-			return fmt.Errorf("error parsing include file '%s', %v", it.val, err)
+			return fmt.Errorf("error parsing include file %q: %w", it.val, err)
 		}
 		for k, v := range m {
 			p.pushKey(k)
