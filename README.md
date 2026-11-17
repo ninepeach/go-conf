@@ -44,6 +44,22 @@ Includes are resolved relative to the including file. Recursive include cycles a
 
 Configuration variables can reference previously defined keys or process environment variables. Avoid parsing untrusted configuration files without restricting which files can be included.
 
+## Strict parsing options
+
+The original four parsing functions remain unchanged. New opt-in entrypoints are `ParseWithOptions`, `ParseFileWithOptions`, `ParseWithChecksAndOptions`, and `ParseFileWithChecksAndOptions`.
+
+```go
+cfg, err := conf.ParseFileWithOptions("config/app.conf", conf.Options{
+    IncludeRoot: "config",
+    EnvAsString: true,
+    RejectDuplicateKeys: true,
+})
+```
+
+`IncludeRoot` confines both the initial file and nested includes to the specified directory after resolving symlinks. `EnvAsString` returns environment variable contents literally instead of interpreting them as configuration syntax. `RejectDuplicateKeys` rejects repeated keys instead of using last-value-wins behavior. All three options are opt-in to preserve compatibility.
+
+The parser also limits individual input files to 8 MiB and include chains to 32 files. These are fixed resource limits.
+
 ## Validation
 
 ```sh
