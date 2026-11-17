@@ -250,7 +250,7 @@ func (p *parser) processItem(it item, fp string) error {
 	case itemInclude:
 		m, err := parseIncludeFile(p, it.val)
 		if err != nil {
-			return fmt.Errorf("error parsing include file '%s', %v", it.val, err)
+			return fmt.Errorf("error parsing include file %q: %w", it.val, err)
 		}
 		for k, v := range m {
 			p.pushKey(k)
